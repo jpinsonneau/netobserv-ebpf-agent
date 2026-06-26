@@ -45,8 +45,10 @@ define MAPS
 	"ipsec_ingress_map":"hash",
 	"ipsec_egress_map":"hash",
 	"ssl_data_event_map":"ringbuf",
+	"ssl_read_active_map":"hash",
 	"dns_name_map":"per_cpu_array",
-	"quic_flows":"per_cpu_hash"
+	"quic_flows":"per_cpu_hash",
+	"sock_hash":"sockhash"
 }
 endef
 

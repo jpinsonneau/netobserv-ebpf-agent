@@ -41,7 +41,9 @@ eBPF verifier requirements:
 
 ### 🚨 Licenses
 - eBPF code (`bpf/`): GPL v2 (see `bpf/LICENSE`)
-- Go code: Apache v2
+- Go code: Apache v2 (`/LICENSE`)
+
+Per-file headers are not required.
 
 ## Effective Prompting
 
@@ -230,9 +232,8 @@ Review for:
 3. Error handling (wrap with context)
 4. Unit test coverage (go test)
 5. Configuration in pkg/config/agent.go AND docs/config.md
-6. License headers (GPL v2 for bpf/, Apache v2 for Go)
-7. Performance impact (eBPF overhead, memory usage)
-8. Security (input validation, no buffer overflows in eBPF)
+6. Performance impact (eBPF overhead, memory usage)
+7. Security (input validation, no buffer overflows in eBPF)
 ```
 
 ## Testing

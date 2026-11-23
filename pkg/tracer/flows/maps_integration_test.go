@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	cilium "github.com/cilium/ebpf"
@@ -46,6 +47,99 @@ func TestFeatureMapsKernel(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSpinLockedMapLookupAndDelete checks the kernel behaviour behind
+// cilium.LookupLock. aggregated_flows contains a bpf_spin_lock in its value.
+func TestSpinLockedMapLookupAndDelete(t *testing.T) {
+	require.NoError(t, rlimit.RemoveMemlock())
+
+	spec, err := ebpfflows.LoadFlowsBpf()
+	require.NoError(t, err)
+	prepareFeatureMapTest(spec)
+
+	collection, err := cilium.NewCollection(spec)
+	require.NoError(t, err)
+	defer collection.Close()
+
+	m := collection.Maps["aggregated_flows"]
+	program := collection.Programs["tc_ingress_flow_parse"]
+	packet := make([]byte, 64)
+	binary.BigEndian.PutUint16(packet[12:14], 0x0800)
+	packet[14], packet[22], packet[23] = 0x45, 64, 17
+	binary.BigEndian.PutUint16(packet[16:18], 50)
+	copy(packet[26:34], []byte{192, 0, 2, 1, 192, 0, 2, 2})
+	binary.BigEndian.PutUint16(packet[34:36], 12345)
+	binary.BigEndian.PutUint16(packet[36:38], 443)
+	binary.BigEndian.PutUint16(packet[38:40], 30)
+
+	_, _, err = program.Test(packet)
+	require.NoError(t, err)
+
+	var key ebpfflows.FlowsBpfFlowId
+	var initial ebpfflows.FlowsBpfFlowMetrics
+	it := m.Iterate()
+	require.True(t, it.Next(&key, &initial))
+	require.NoError(t, it.Err())
+
+	// Run the real BPF flow parser while userspace repeatedly reads the same
+	// value. The writer updates packets and bytes under bpf_spin_lock; a torn
+	// snapshot would violate bytes == packets * packet length.
+	lookup := func(name string, flags cilium.MapLookupFlags) int {
+		const iterations = 20000
+		start := make(chan struct{})
+		writerDone := make(chan struct{})
+		writerErr := make(chan error, 1)
+		var writer sync.WaitGroup
+		writer.Add(1)
+		go func() {
+			defer writer.Done()
+			defer close(writerDone)
+			<-start
+			for i := 0; i < iterations; i++ {
+				if _, _, err := program.Test(packet); err != nil {
+					writerErr <- err
+					return
+				}
+			}
+		}()
+
+		close(start)
+		mismatches := 0
+		for i := 0; i < iterations; i++ {
+			var got ebpfflows.FlowsBpfFlowMetrics
+			require.NoError(t, m.LookupWithFlags(&key, &got, flags))
+			if got.Bytes != uint64(got.Packets)*uint64(len(packet)) {
+				mismatches++
+				if mismatches <= 3 {
+					t.Logf("%s observed torn snapshot: bytes=%d packets=%d", name, got.Bytes, got.Packets)
+				}
+			}
+		}
+		<-writerDone
+		writer.Wait()
+		select {
+		case err := <-writerErr:
+			require.NoError(t, err)
+		default:
+		}
+		return mismatches
+	}
+
+	unflaggedMismatches := lookup("unflagged", 0)
+	t.Logf("unflagged mismatches: %d", unflaggedMismatches)
+
+	var discarded ebpfflows.FlowsBpfFlowMetrics
+	require.NoError(t, m.LookupAndDeleteWithFlags(&key, &discarded, cilium.LookupLock))
+	_, _, err = program.Test(packet)
+	require.NoError(t, err)
+
+	flaggedMismatches := lookup("with LookupLock", cilium.LookupLock)
+	require.Zero(t, flaggedMismatches)
+
+	var value ebpfflows.FlowsBpfFlowMetrics
+	require.NoError(t, m.LookupAndDeleteWithFlags(&key, &value, cilium.LookupLock))
+	require.Equal(t, value.Bytes, uint64(value.Packets)*uint64(len(packet)))
 }
 
 func TestQUICMapKernel(t *testing.T) {
